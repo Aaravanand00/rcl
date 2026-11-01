@@ -18,6 +18,8 @@
 
 #include <gtest/gtest.h>
 
+#include <string>
+
 #include "rcl/error_handling.h"
 
 #include "rcl_lifecycle/rcl_lifecycle.h"
@@ -202,6 +204,92 @@ TEST_F(TestTransitionMap, get_label_by_id) {
 
   EXPECT_STREQ("from0to1", rcl_lifecycle_get_transition_label_by_id(&transition_map, 0));
   EXPECT_STREQ("from1to0", rcl_lifecycle_get_transition_label_by_id(&transition_map, 1));
+
+  EXPECT_EQ(RCL_RET_OK, rcl_lifecycle_transition_map_fini(&transition_map, &allocator));
+}
+
+TEST_F(TestTransitionMap, register_state_after_transition) {
+  rcl_lifecycle_transition_map_t transition_map =
+    rcl_lifecycle_get_zero_initialized_transition_map();
+
+  rcl_allocator_t allocator = rcl_get_default_allocator();
+
+  rcl_lifecycle_state_t state0 = {"my_state_0", 0, NULL, 0};
+  rcl_ret_t ret = rcl_lifecycle_register_state(&transition_map, state0, &allocator);
+  ASSERT_EQ(RCL_RET_OK, ret);
+
+  rcl_lifecycle_state_t state1 = {"my_state_1", 1, NULL, 0};
+  ret = rcl_lifecycle_register_state(&transition_map, state1, &allocator);
+  ASSERT_EQ(RCL_RET_OK, ret);
+
+  rcl_lifecycle_state_t * start_state =
+    rcl_lifecycle_get_state(&transition_map, state0.id);
+  rcl_lifecycle_state_t * goal_state =
+    rcl_lifecycle_get_state(&transition_map, state1.id);
+  ASSERT_NE(nullptr, start_state);
+  ASSERT_NE(nullptr, goal_state);
+
+  rcl_lifecycle_transition_t transition01 = {"from0to1", 0,
+    start_state, goal_state};
+  ret = rcl_lifecycle_register_transition(
+    &transition_map, transition01, &allocator);
+  EXPECT_EQ(RCL_RET_OK, ret);
+  EXPECT_EQ(1u, transition_map.transitions_size);
+
+  rcl_lifecycle_transition_t transition10 = {"from1to0", 1,
+    goal_state, start_state};
+  ret = rcl_lifecycle_register_transition(
+    &transition_map, transition10, &allocator);
+  EXPECT_EQ(RCL_RET_OK, ret);
+  EXPECT_EQ(2u, transition_map.transitions_size);
+
+  // Register several additional states after transitions exist to force reallocation
+  for (uint8_t id = 2; id < 20; ++id) {
+    std::string label = "my_state_" + std::to_string(id);
+    rcl_lifecycle_state_t new_state = {label.c_str(), id, NULL, 0};
+    ret = rcl_lifecycle_register_state(&transition_map, new_state, &allocator);
+    ASSERT_EQ(RCL_RET_OK, ret);
+  }
+
+  // Verify that transition pointers still point to valid states in the map (not dangling)
+  EXPECT_EQ(0u, transition_map.transitions[0].start->id);
+  EXPECT_EQ(1u, transition_map.transitions[0].goal->id);
+  EXPECT_STREQ("from0to1", transition_map.transitions[0].label);
+  EXPECT_EQ(&transition_map.states[0], transition_map.transitions[0].start);
+  EXPECT_EQ(&transition_map.states[1], transition_map.transitions[0].goal);
+
+  EXPECT_EQ(1u, transition_map.transitions[1].start->id);
+  EXPECT_EQ(0u, transition_map.transitions[1].goal->id);
+  EXPECT_STREQ("from1to0", transition_map.transitions[1].label);
+  EXPECT_EQ(&transition_map.states[1], transition_map.transitions[1].start);
+  EXPECT_EQ(&transition_map.states[0], transition_map.transitions[1].goal);
+
+  // Also verify valid_transitions inside state0 and state1
+  rcl_lifecycle_state_t * current_s0 = rcl_lifecycle_get_state(&transition_map, 0);
+  ASSERT_NE(nullptr, current_s0);
+  ASSERT_EQ(1u, current_s0->valid_transition_size);
+  EXPECT_EQ(&transition_map.states[0], current_s0->valid_transitions[0].start);
+  EXPECT_EQ(&transition_map.states[1], current_s0->valid_transitions[0].goal);
+
+  rcl_lifecycle_state_t * current_s1 = rcl_lifecycle_get_state(&transition_map, 1);
+  ASSERT_NE(nullptr, current_s1);
+  ASSERT_EQ(1u, current_s1->valid_transition_size);
+  EXPECT_EQ(&transition_map.states[1], current_s1->valid_transitions[0].start);
+  EXPECT_EQ(&transition_map.states[0], current_s1->valid_transitions[0].goal);
+
+  // Register a new transition involving the newly added state
+  rcl_lifecycle_state_t * state2 = rcl_lifecycle_get_state(&transition_map, 2);
+  ASSERT_NE(nullptr, state2);
+  rcl_lifecycle_transition_t transition02 = {"from0to2", 2, current_s0, state2};
+  ret = rcl_lifecycle_register_transition(&transition_map, transition02, &allocator);
+  EXPECT_EQ(RCL_RET_OK, ret);
+  EXPECT_EQ(3u, transition_map.transitions_size);
+
+  const rcl_lifecycle_transition_t * trans =
+    rcl_lifecycle_get_transition_by_id(current_s0, 2);
+  ASSERT_NE(nullptr, trans);
+  EXPECT_EQ(2u, trans->id);
+  EXPECT_EQ(2u, trans->goal->id);
 
   EXPECT_EQ(RCL_RET_OK, rcl_lifecycle_transition_map_fini(&transition_map, &allocator));
 }

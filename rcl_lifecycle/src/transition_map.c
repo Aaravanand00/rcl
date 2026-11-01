@@ -18,6 +18,7 @@ extern "C"
 #endif
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "rcl/allocator.h"
 #include "rcl/error_handling.h"
@@ -101,6 +102,10 @@ rcl_lifecycle_register_state(
 
   RCL_CHECK_ALLOCATOR_WITH_MSG(
     allocator, "invalid allocator", return RCL_RET_INVALID_ARGUMENT)
+
+  uintptr_t old_base = (uintptr_t)transition_map->states;
+  uintptr_t old_end = old_base + (transition_map->states_size * sizeof(rcl_lifecycle_state_t));
+
   // add new primary state memory
   unsigned int new_states_size = transition_map->states_size + 1;
   rcl_lifecycle_state_t * new_states = allocator->reallocate(
@@ -109,6 +114,40 @@ rcl_lifecycle_register_state(
     allocator->state);
   RCL_CHECK_FOR_NULL_WITH_MSG(
     new_states, "failed to reallocate memory for new states", return RCL_RET_BAD_ALLOC);
+
+  uintptr_t new_base = (uintptr_t)new_states;
+  if (old_base != 0 && new_base != old_base) {
+    // If memory moved, re-link start and goal pointers in all registered transitions
+    for (unsigned int i = 0; i < transition_map->transitions_size; ++i) {
+      uintptr_t start_addr = (uintptr_t)transition_map->transitions[i].start;
+      if (start_addr >= old_base && start_addr < old_end) {
+        size_t idx = (start_addr - old_base) / sizeof(rcl_lifecycle_state_t);
+        transition_map->transitions[i].start = &new_states[idx];
+      }
+      uintptr_t goal_addr = (uintptr_t)transition_map->transitions[i].goal;
+      if (goal_addr >= old_base && goal_addr < old_end) {
+        size_t idx = (goal_addr - old_base) / sizeof(rcl_lifecycle_state_t);
+        transition_map->transitions[i].goal = &new_states[idx];
+      }
+    }
+
+    // Re-link start and goal pointers in valid_transitions of existing states
+    for (unsigned int s = 0; s < transition_map->states_size; ++s) {
+      for (unsigned int v = 0; v < new_states[s].valid_transition_size; ++v) {
+        uintptr_t start_addr = (uintptr_t)new_states[s].valid_transitions[v].start;
+        if (start_addr >= old_base && start_addr < old_end) {
+          size_t idx = (start_addr - old_base) / sizeof(rcl_lifecycle_state_t);
+          new_states[s].valid_transitions[v].start = &new_states[idx];
+        }
+        uintptr_t goal_addr = (uintptr_t)new_states[s].valid_transitions[v].goal;
+        if (goal_addr >= old_base && goal_addr < old_end) {
+          size_t idx = (goal_addr - old_base) / sizeof(rcl_lifecycle_state_t);
+          new_states[s].valid_transitions[v].goal = &new_states[idx];
+        }
+      }
+    }
+  }
+
   transition_map->states_size = new_states_size;
   transition_map->states = new_states;
   transition_map->states[transition_map->states_size - 1] = state;
@@ -143,6 +182,11 @@ rcl_lifecycle_register_transition(
     RCL_SET_ERROR_MSG_WITH_FORMAT_STRING("state %u is not registered\n", transition.goal->id);
     return RCL_RET_LIFECYCLE_STATE_NOT_REGISTERED;
   }
+
+  // Ensure start and goal pointers point to the state instances inside the transition map
+  transition.start = state;
+  transition.goal = goal;
+
   // Attempt to add new transition, don't update map if it fails
   unsigned int new_transitions_size = transition_map->transitions_size + 1;
   rcl_lifecycle_transition_t * new_transitions = allocator->reallocate(
